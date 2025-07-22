@@ -8,7 +8,7 @@ import os, multiprocessing, multiprocessing.pool
 NUM_CLASSES = 15
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['KMP_DUPLICATE_LIB_OK'] = "TRUE"
-root_path = '/Users/jartus/Chinese-Chess/CNN_Classification_Model'
+root_path = '/Users/nghiatruong/Resources/ChineseChessRecognition/CNN_Classification_Model'
 os.chdir(root_path)
 
 # The things you need to change is in here

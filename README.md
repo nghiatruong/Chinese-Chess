@@ -1,3 +1,8 @@
+pip install tensorflow==2.13.1
+mysql_secure_installation
+database
+@ntKing2025
+
 # Chinese Chess Recognition
 To solve this problem, the first step is to identify the beginning point and the end point of the pieces movement. The second step is to crop a square image on the begin/end point and pass it to convolutional neural network (CNN) to do the chess pieces classification.
 ![Flow Chart](./Sources/Flow%20chart.png)

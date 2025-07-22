@@ -22,10 +22,18 @@ def Initialization():
 	legal_move = True	# To decide if the move is legal or illegal
 	isRed = True		# To decide which team moves now
 	target_size = (56, 56)		# CNN input image size
+	print("Before loadmodel:")
 	model = load_model('./h5_file/new_model_v2.h5')	# Machine Learning Model
+	model.summary()
+	print("Model input shape:", model.input_shape)
 	
 	# Initialize mysql
-	db = pymysql.connect("localhost", "root", "root", "chess")
+	db = pymysql.connect(
+		host="localhost",
+		user="root",
+		password="@ntKing2025",
+		database="chess"
+	)
 	cursor = db.cursor()
 	cursor.execute("DROP TABLE IF EXISTS chess")
 	sql1 = """CREATE TABLE chess (
@@ -36,9 +44,18 @@ def Initialization():
 	cursor.execute(sql1)
 	print('SQL Initialized.')
 	
-	# Initialize grid width
 	frame0 = cv2.imread('./Test_Image/Step 0.png', 0)
-	img_circle = cv2.HoughCircles(frame0,cv2.HOUGH_GRADIENT,1,40,param1=100,param2=20,minRadius=18,maxRadius=22)[0]
+	frame0 = cv2.GaussianBlur(frame0, (9, 9), 2)
+
+	circles = cv2.HoughCircles(frame0, cv2.HOUGH_GRADIENT, 1.2, 30,
+                           param1=50, param2=30, minRadius=15, maxRadius=25)
+	# if circles is None {
+	# 	print("❌ Không phát hiện được đường tròn trong ảnh. Vui lòng kiểm tra lại ảnh hoặc điều chỉnh thông số HoughCircles.")
+	# 	exit(1)
+	# }
+	img_circle = circles[0]
+
+	img_circle = circles[0]
 	begin_point = img_circle[np.sum(img_circle, axis=1).tolist().index(min(np.sum(img_circle, axis=1).tolist()))]
 	end_point = img_circle[np.sum(img_circle, axis=1).tolist().index(max(np.sum(img_circle, axis=1).tolist()))]
 	GRID_WIDTH_HORI = (end_point[0] - begin_point[0])/8
@@ -50,7 +67,10 @@ def PiecePrediction(model, img, target_size, top_n=3):
 	x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
 	x = x / 255
 	x = np.expand_dims(x, axis=0)
-	preds = model.predict_classes(x)
+	print(x.shape)
+	# preds = model.predict_classes(x)
+	pred = model.predict(x)
+	preds = np.argmax(pred, axis=-1)
 	return label_type[int(preds)]
 
 def savePath(beginPoint, endPoint, piece):
@@ -165,21 +185,35 @@ def CalculateTrace(pre_img, cur_img, x, y, w, h):
 		return [], [], []
 	return beginPoint, endPoint, piece
 
-def changeDetection(previous_step, current_step, visual = False):
-	current_frame_gray = cv2.cvtColor(current_step, cv2.COLOR_BGR2GRAY)
-	previous_frame_gray = cv2.cvtColor(previous_step, cv2.COLOR_BGR2GRAY)
-	frame_diff = cv2.absdiff(current_frame_gray, previous_frame_gray)
-	frame_diff = cv2.medianBlur(frame_diff, 5)
-	ret, frame_diff = cv2.threshold(frame_diff, 0, 255, cv2.THRESH_OTSU)
-	frame_diff = cv2.medianBlur(frame_diff, 5)
-	x, y, w, h = cv2.boundingRect(frame_diff)
-	#### For Test ####
-	if visual:
-		cv2.rectangle(frame_diff, (x, y), (x + w, y + h), (255, 255, 255), 2)
-		cv2.imshow('', frame_diff)
-		cv2.waitKey(20)
-	#### For Test ####
-	return x, y, w, h
+def changeDetection(previous_step, current_step, visual=False):
+    # Chuyển sang grayscale
+    prev_gray = cv2.cvtColor(previous_step, cv2.COLOR_BGR2GRAY)
+    curr_gray = cv2.cvtColor(current_step, cv2.COLOR_BGR2GRAY)
+
+    # Resize curr_gray về cùng kích thước với prev_gray
+    h, w = prev_gray.shape
+    if curr_gray.shape != prev_gray.shape:
+        curr_gray = cv2.resize(curr_gray, (w, h))
+
+    # Debug kích thước
+    if visual or True:
+        print(f"  → prev_gray: {prev_gray.shape}, curr_gray: {curr_gray.shape}")
+
+    # Tính độ khác biệt
+    diff = cv2.absdiff(curr_gray, prev_gray)
+    diff = cv2.medianBlur(diff, 5)
+    _, diff = cv2.threshold(diff, 0, 255, cv2.THRESH_OTSU)
+    diff = cv2.medianBlur(diff, 5)
+
+    # Tính bounding box
+    x, y, w, h = cv2.boundingRect(diff)
+
+    if visual:
+        cv2.rectangle(diff, (x, y), (x+w, y+h), (255,255,255), 2)
+        cv2.imshow('diff', diff)
+        cv2.waitKey(20)
+
+    return x, y, w, h
 
 def compare(img1, img2, x, y, w, h):
 	subset = []
@@ -224,50 +258,111 @@ def PiecesChangeDetection(current_step):
 			return 1
 		else:
 			print('Please rollback to step %d' % step)
-			while (True):
-				r, frame = cap.read()
-				frame = frame[0:480, 0:480]
-				x, y, w, h = changeDetection(previous_step, frame)
-				if x != 0 and y != 0 and x + w != 480 and y + h != 480 and compare(previous_step, frame, x, y, w, h):
-					legal_move = True
-					cv2.imwrite('./Test_Image/Step %d.png' % step, frame)
-					print('Rollback successfully!')
-					break
+			# while (True):
+				# r, frame = cap.read()
+			frame = new_frame[0:480, 0:480]
+			x, y, w, h = changeDetection(previous_step, frame)
+			if x != 0 and y != 0 and x + w != 480 and y + h != 480 and compare(previous_step, frame, x, y, w, h):
+				legal_move = True
+				cv2.imwrite('./Test_Image/Step %d.png' % step, frame)
+				print('Rollback successfully!')
+				# break
 			return 0
 
-if __name__ == '__main__':
-	# Initialize camera
-	# cap = cv2.VideoCapture("http://admin:admin@%s:8081/" % ip)
-	cap = cv2.VideoCapture('./Sources/test.avi')
-	if cap.isOpened():
-		for j in range(20):
-			cap.read()
-		ret, current_frame = cap.read()
-		current_frame = current_frame[0:480, 0:480]
-		cv2.imwrite('./Test_Image/Step 0.png', current_frame)
-	else:
-		exit('Camera is not open.')
-	print('Camera Initialized.')
-	previous_frame = current_frame
-	Initialization()
-	while (cap.isOpened()):
-		x, y, w, h = changeDetection(current_frame, previous_frame)
-		if (x == 0 and y == 0 and w == 480 and h == 480):
-			num = PiecesChangeDetection(current_frame)
-			if num == 1:
-				step += 1
-				isRed = bool(1 - isRed)
-			elif num == 0: 
-				pass
-		previous_frame = current_frame.copy()
-		ret, current_frame = cap.read()
-		if not ret:
-			break
-		current_frame = current_frame[0:480, 0:480]
-		cv2.rectangle(current_frame, ad.begin, (ad.begin[0] + 400, ad.begin[1] + 400), (255, 255, 255), 2)
-		cv2.imshow('', current_frame)
-		cv2.waitKey(1)
+def generate_fen_from_image(image_path):
+    img = cv2.imread(image_path)
+    if img is None:
+        print(f"❌ Không đọc được ảnh: {image_path}")
+        return None
 
-	cap.release()
-	cv2.destroyAllWindows()
-	db.close()
+    img = img[0:480, 0:480]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (9, 9), 2)
+    circles = cv2.HoughCircles(blur, cv2.HOUGH_GRADIENT, 1.2, 30,
+                                param1=50, param2=30, minRadius=15, maxRadius=25)
+
+    if circles is None:
+        print("❌ Không phát hiện được đường tròn (quân cờ).")
+        return None
+
+    circles = np.uint16(np.around(circles[0]))
+    board = [['1' for _ in range(9)] for _ in range(10)]  # 10 rows x 9 columns
+
+    for circle in circles:
+        x, y, r = circle
+        col = int(round((x - begin_point[0]) / GRID_WIDTH_HORI))
+        row = int(round((y - begin_point[1]) / GRID_WIDTH_VERTI))
+
+        if not (0 <= row < 10 and 0 <= col < 9):
+            continue
+
+        piece_img = img[y - r:y + r, x - r:x + r]
+        if piece_img.shape[0] == 0 or piece_img.shape[1] == 0:
+            continue
+
+        label = PiecePrediction(model, piece_img, target_size)
+        board[row][col] = label
+
+    # Convert to FEN-like string
+    def label_to_char(label):
+        mapping = {
+            'b_jiang': 'k', 'b_shi': 'a', 'b_xiang': 'b', 'b_ma': 'n',
+            'b_ju': 'r', 'b_pao': 'c', 'b_zu': 'p',
+            'r_shuai': 'K', 'r_shi': 'A', 'r_xiang': 'B', 'r_ma': 'N',
+            'r_ju': 'R', 'r_pao': 'C', 'r_bing': 'P'
+        }
+        return mapping.get(label, '1')
+
+    fen_rows = []
+    for row in board:
+        fen_row = ''
+        count = 0
+        for cell in row:
+            if cell == '1':
+                count += 1
+            else:
+                if count > 0:
+                    fen_row += str(count)
+                    count = 0
+                fen_row += label_to_char(cell)
+        if count > 0:
+            fen_row += str(count)
+        fen_rows.append(fen_row)
+
+    fen_string = '/'.join(fen_rows) 
+    fen_string += " w"
+    return fen_string
+
+if __name__ == '__main__':
+    # Load ảnh đầu tiên và lưu thành Step 0
+    current_frame = cv2.imread('./Sources/test4.png')
+    if current_frame is None:
+        exit('❌ Không đọc được ảnh ./Sources/test3.png')
+
+    current_frame = current_frame[0:480, 0:480]
+    cv2.imwrite('./Test_Image/Step 0.png', current_frame)
+    print("✅ Ảnh đã được load và lưu tạm.")
+
+    # Khởi tạo mô hình và database
+    Initialization()
+    fen = generate_fen_from_image('./Sources/test3.png')
+    print("FEN:", fen)
+    # # Giả lập một lần kiểm tra xem có thay đổi không
+    # previous_frame = current_frame.copy()
+
+    # # Load ảnh mới để test sự thay đổi (ví dụ test2.png là ảnh sau khi có di chuyển)
+    # new_frame = cv2.imread('./Sources/test4.png')
+    # if new_frame is None:
+    #     exit('❌ Không đọc được ảnh ./Sources/test4.png')
+
+    # new_frame = new_frame[0:480, 0:480]
+
+    # num = PiecesChangeDetection(new_frame)
+    # if num == 1:
+    #     print("✅ Đã ghi nhận một bước di chuyển.")
+    # elif num == 0:
+    #     print("⚠️ Không phát hiện bước di chuyển hợp lệ.")
+
+    cv2.destroyAllWindows()
+    db.close()
+
