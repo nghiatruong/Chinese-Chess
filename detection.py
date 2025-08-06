@@ -54,25 +54,42 @@ def detect_board_grid(image):
 
 # Hàm ánh xạ quân cờ vào lưới
 def map_to_board(boxes, grid, board_map):
-    board_state = {}
+    # Xử lý trùng lặp vị trí - chỉ giữ lại quân có độ tin cậy cao nhất ở mỗi vị trí
+    positions_seen = {}  # Lưu vị trí đã gặp và confidence cao nhất
+    
     for box in boxes:
         x, y, w, h = box.xywh[0]
-        label = box.cls  # Nhãn quân cờ
+        label_idx = int(box.cls)  # Index của quân cờ
+        confidence = float(box.conf)  # Độ tin cậy của dự đoán
         closest = min(grid, key=lambda p: ((p[0]-x)**2 + (p[1]-y)**2)**0.5)
-        board_state[label] = board_map[closest]
-    return board_state
+        position = board_map[closest]
+        
+        # Nếu vị trí đã có quân khác và quân hiện tại có độ tin cậy thấp hơn, bỏ qua
+        if position in positions_seen and positions_seen[position]['confidence'] > confidence:
+            continue
+            
+        # Lưu hoặc cập nhật quân cờ ở vị trí này
+        positions_seen[position] = {
+            'piece': label_idx,
+            'position': position,
+            'confidence': confidence
+        }
+    
+    # Chuyển dict thành list và sắp xếp theo độ tin cậy giảm dần
+    board_state = list(positions_seen.values())
+    return sorted(board_state, key=lambda x: (-x['confidence'], x['position']))
 
 
 # Huấn luyện YOLOv8
 def train_model():
-    model = YOLO("yolov8s.pt")  # Model base
+    model = YOLO("yolov8m.pt")  # Sử dụng model medium để có độ chính xác cao hơn
     model.train(
         data="chinese-chess-detect-for-yolo-8/data.yaml",  # Dataset
         imgsz=640,               # Kích thước phù hợp với quân cờ
         epochs=150,              # Tăng số epoch để học tốt hơn
-        batch=16,                # Tăng batch size cho GPU RTX 3060
+        batch=8,                 # Giảm batch size cho RTX 3060
         name="xiangqi_model",    # Tên thư mục output
-        workers=4,               # Số lượng luồng load data
+        workers=2,               # Giảm số luồng để tiết kiệm RAM
         patience=30,             # Tăng patience để tránh dừng sớm
         optimizer='AdamW',       # Dùng AdamW cho hiệu quả tốt hơn
         lr0=0.001,              # Learning rate khởi đầu ổn định
@@ -96,7 +113,16 @@ def train_model():
         amp=False,              # Tắt mixed precision do lỗi CUDA
         plots=True              # Lưu biểu đồ loss
     )
-    shutil.copy("runs/detect/xiangqi_model/weights/best.pt", "xiangqi_yolov8.pt")
+    
+    # Check if the weights file exists before copying
+    weights_path = "runs/detect/xiangqi_model/weights/best.pt"
+    if os.path.exists(weights_path):
+        print(f"Copying best weights from {weights_path} to xiangqi_yolov8.pt")
+        shutil.copy(weights_path, "xiangqi_yolov8.pt")
+    else:
+        print(f"Warning: Weights file not found at {weights_path}")
+        print("Training may not have completed successfully")
+    
     return model
 
 # Phát hiện quân cờ và vị trí
@@ -131,7 +157,11 @@ def detect_pieces(image_path):
         print(f"Error: Model file {model_path} not found")
         return
     try:
+        # Load model với half precision để giảm VRAM và tăng tốc độ
         model = YOLO(model_path)
+        model.to('cuda')  # Đảm bảo model ở trên GPU
+        if torch.cuda.is_available():
+            model.model.half()  # Chuyển sang FP16 để tăng tốc độ
         print("Model loaded successfully")
         # In thông tin về model
         print(f"Model info: {model.info()}")
@@ -141,10 +171,64 @@ def detect_pieces(image_path):
         return
         
     try:
-        # Resize ảnh về đúng kích thước training
-        image_resized = cv2.resize(image, (640, 640))
-        results = model(image_resized, conf=0.05)  # Giảm ngưỡng confidence xuống 0.05
-        print(f"Raw detection results: {results[0]}")  # In chi tiết kết quả detection
+        # Tiền xử lý ảnh để tăng độ tương phản và độ rõ nét
+        all_detections = []
+        
+        # Các kích thước ảnh khác nhau để thử
+        image_sizes = [640, 800, 1024]
+        
+        # Các phiên bản xử lý ảnh khác nhau
+        processed_images = []
+        
+        # 1. Ảnh gốc
+        processed_images.append(image.copy())
+        
+        # 2. Tăng độ tương phản
+        contrast_enhanced = cv2.convertScaleAbs(image, alpha=1.2, beta=0)
+        processed_images.append(contrast_enhanced)
+        
+        # 3. Cân bằng màu
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        cl = clahe.apply(l)
+        enhanced_lab = cv2.merge((cl,a,b))
+        color_enhanced = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+        processed_images.append(color_enhanced)
+        
+        # Thử với mỗi phiên bản ảnh và mỗi kích thước
+        for img in processed_images:
+            for size in image_sizes:
+                # Resize giữ tỷ lệ
+                height, width = img.shape[:2]
+                scale = size / max(height, width)
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                image_resized = cv2.resize(img, (new_width, new_height))
+                
+                # Pad ảnh
+                pad_h = size - new_height
+                pad_w = size - new_width
+                image_padded = cv2.copyMakeBorder(image_resized, 0, pad_h, 0, pad_w,
+                                                cv2.BORDER_CONSTANT, value=(114, 114, 114))
+                
+                # Inference với các tham số
+                with torch.amp.autocast('cuda'):
+                    results = model(image_padded,
+                                  conf=0.01,    # Confidence thấp để bắt tất cả khả năng
+                                  iou=0.5,      # IoU cao để tránh trùng lặp
+                                  max_det=32,    # Số quân cờ tối đa
+                                  half=True)     # Sử dụng FP16
+                    
+                all_detections.extend(results[0].boxes)
+                
+        # Gộp và lọc kết quả
+        results = [results[0]]  # Giữ lại kết quả cuối để dùng cho phần sau
+        results[0].boxes = all_detections
+        
+        # In tóm tắt kết quả
+        n_detections = len(all_detections)
+        print(f"\nTìm thấy {n_detections} quân cờ")
         
         if len(results[0].boxes) == 0:
             # Thử detect với ảnh gốc
@@ -157,27 +241,72 @@ def detect_pieces(image_path):
     except Exception as e:
         print(f"Error during detection: {str(e)}")
         return
-    print(f"Detection results: {len(results[0].boxes)} objects found")
+    # Dictionary chuyển đổi tên quân cờ
+    piece_names = {
+        'b_shi': 'Sĩ Đen',
+        'b_pao': 'Pháo Đen',
+        'b_ju': 'Xe Đen',
+        'b_xiang': 'Tượng Đen',
+        'b_jiang': 'Tướng Đen',
+        'b_ma': 'Mã Đen',
+        'b_zu': 'Tốt Đen',
+        'r_shi': 'Sĩ Đỏ',
+        'r_pao': 'Pháo Đỏ',
+        'r_ju': 'Xe Đỏ',
+        'r_xiang': 'Tượng Đỏ',
+        'r_jiang': 'Tướng Đỏ',
+        'r_ma': 'Mã Đỏ',
+        'r_bing': 'Binh Đỏ'
+    }
+
+    print(f"\nDetection results: {len(results[0].boxes)} objects found")
+    print("-" * 50)
 
     # Ánh xạ quân cờ
     board_state = map_to_board(results[0].boxes, grid, board_map)
-
-    # In kết quả
-    for piece, pos in board_state.items():
-        print(f"{piece}: {pos}")
+    
+    # In kết quả phân tích
+    for piece in board_state:
+        piece_code = model.names[piece['piece']]
+        piece_name = piece_names[piece_code]
+        confidence = piece['confidence'] * 100
+        position = piece['position']
+        print(f"{piece_name:<12} tại {position:<4} (độ tin cậy: {confidence:>5.1f}%)")
 
     # Vẽ nhãn lên ảnh
     for box in results[0].boxes:
         x, y, w, h = box.xywh[0]
-        label = box.cls
+        piece_code = model.names[int(box.cls)]  # Lấy mã quân cờ
+        piece_type = piece_names[piece_code]    # Chuyển đổi sang tên tiếng Việt
+        position = board_map[min(grid, key=lambda p: ((p[0]-x)**2 + (p[1]-y)**2)**0.5)]
+        
+        # Chọn màu dựa vào loại quân (đỏ hoặc đen)
+        color = (0, 0, 255) if piece_type.startswith('r_') else (0, 255, 0)
+        
+        # Vẽ bounding box
+        x1, y1 = int(x - w/2), int(y - h/2)
+        x2, y2 = int(x + w/2), int(y + h/2)
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+        
+        # Vẽ nhãn với font lớn hơn và có nền
+        label = f"{piece_type}: {position}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.8
+        thickness = 2
+        
+        # Tính kích thước text để vẽ nền
+        (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+        cv2.rectangle(image, (x1, y1 - text_height - 5), (x1 + text_width, y1), color, -1)
+        
+        # Vẽ text
         cv2.putText(
             image,
-            f"{label}: {board_map[min(grid, key=lambda p: ((p[0]-x)**2 + (p[1]-y)**2)**0.5)]}",
-            (int(x-w/2), int(y-h/2)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 0),
-            2
+            label,
+            (x1, y1 - 5),
+            font,
+            font_scale,
+            (255, 255, 255),  # Màu trắng cho text
+            thickness
         )
     cv2.imwrite("output.jpg", image)
 
@@ -185,8 +314,8 @@ def detect_pieces(image_path):
 # Chạy huấn luyện và phát hiện
 if __name__ == "__main__":
     # Bỏ comment để huấn luyện
-    train_model()
+    # train_model()
 
     # Phát hiện trên ảnh mới
-    # detect_pieces("testdata/test10.png")
+    detect_pieces("testdata/test10.png")
     
