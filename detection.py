@@ -183,17 +183,25 @@ def detect_pieces(image_path):
         # 1. Ảnh gốc
         processed_images.append(image.copy())
         
-        # 2. Tăng độ tương phản
-        contrast_enhanced = cv2.convertScaleAbs(image, alpha=1.2, beta=0)
+        # 2. Tăng độ tương phản mạnh hơn
+        contrast_enhanced = cv2.convertScaleAbs(image, alpha=1.5, beta=10)
         processed_images.append(contrast_enhanced)
         
-        # 3. Cân bằng màu
+        # 3. Cân bằng màu với CLAHE mạnh hơn
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8))
         cl = clahe.apply(l)
         enhanced_lab = cv2.merge((cl,a,b))
         color_enhanced = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+        
+        # 4. Tăng độ sắc nét
+        kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+        sharpened = cv2.filter2D(image, -1, kernel)
+        processed_images.append(sharpened)
+        
+        # 5. Kết hợp CLAHE với sharpening
+        sharp_enhanced = cv2.filter2D(color_enhanced, -1, kernel)
         processed_images.append(color_enhanced)
         
         # Thử với mỗi phiên bản ảnh và mỗi kích thước
@@ -215,12 +223,30 @@ def detect_pieces(image_path):
                 # Inference với các tham số
                 with torch.amp.autocast('cuda'):
                     results = model(image_padded,
-                                  conf=0.01,    # Confidence thấp để bắt tất cả khả năng
-                                  iou=0.5,      # IoU cao để tránh trùng lặp
-                                  max_det=32,    # Số quân cờ tối đa
-                                  half=True)     # Sử dụng FP16
+                                  conf=0.15,    # Giảm ngưỡng confidence để bắt được nhiều quân hơn
+                                  iou=0.45,     # Tăng IoU để lọc trùng lặp tốt hơn
+                                  max_det=32,   # Số quân cờ tối đa
+                                  agnostic_nms=False,  # Tắt agnostic_nms để phân biệt các class
+                                  half=True)    # Sử dụng FP16
                     
-                all_detections.extend(results[0].boxes)
+                # Thêm detection với điều kiện phù hợp
+                for box in results[0].boxes:
+                    conf = float(box.conf)
+                    if conf >= 0.15:  # Chỉ lấy các detection có độ tin cậy đủ cao
+                        # Kiểm tra xem detection này có trùng với detection nào trước đó không
+                        x, y, w, h = box.xywh[0]
+                        is_duplicate = False
+                        for existing_box in all_detections:
+                            ex_x, ex_y, ex_w, ex_h = existing_box.xywh[0]
+                            # Tính khoảng cách giữa tâm của 2 box
+                            distance = ((x - ex_x) ** 2 + (y - ex_y) ** 2) ** 0.5
+                            if distance < min(w, h) * 0.5:  # Nếu quá gần nhau
+                                if conf <= float(existing_box.conf):  # Và confidence thấp hơn
+                                    is_duplicate = True
+                                    break
+                        
+                        if not is_duplicate:
+                            all_detections.append(box)
                 
         # Gộp và lọc kết quả
         results = [results[0]]  # Giữ lại kết quả cuối để dùng cho phần sau
@@ -265,13 +291,25 @@ def detect_pieces(image_path):
     # Ánh xạ quân cờ
     board_state = map_to_board(results[0].boxes, grid, board_map)
     
-    # In kết quả phân tích
+    # In kết quả phân tích và tổng hợp theo màu
+    red_pieces = 0
+    black_pieces = 0
     for piece in board_state:
         piece_code = model.names[piece['piece']]
         piece_name = piece_names[piece_code]
         confidence = piece['confidence'] * 100
         position = piece['position']
         print(f"{piece_name:<12} tại {position:<4} (độ tin cậy: {confidence:>5.1f}%)")
+        
+        # Đếm số quân theo màu
+        if piece_code.startswith('r_'):
+            red_pieces += 1
+        else:
+            black_pieces += 1
+            
+    print(f"\nTổng số quân cờ: {len(board_state)}")
+    print(f"- Quân đỏ: {red_pieces}")
+    print(f"- Quân đen: {black_pieces}")
 
     # Vẽ nhãn lên ảnh
     for box in results[0].boxes:
